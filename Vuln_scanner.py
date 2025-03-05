@@ -1,83 +1,125 @@
 import requests
 import threading
-from termcolor import colored
 import socket
+import yaml
+import json
+import argparse
+import logging
+from tqdm import tqdm
+from concurrent.futures import ThreadPoolExecutor
+from termcolor import colored
 
-def print_banner():
-    banner = """
-    _______  _______  _______  _______  _______  _______  _______
-   |       ||       ||       ||       ||       ||       ||       |
-   |  _____||  _____||  _____||  _____||  _____||  _____||  _____|
-   | |_____ | |_____ | |_____ | |_____ | |_____ | |_____ | |_____
-   |_____  ||_____  ||_____  ||_____  ||_____  ||_____  ||_____  |
-          |       |       |       |       |       |       |       |
-          |_______|_______|_______|_______|_______|_______|_______|
-    """
-    print(colored(banner, 'green'))
+# Configure Logging
+logging.basicConfig(filename="scanner.log", level=logging.INFO, format="%(asctime)s - %(message)s")
 
-def scan_xss(url, payloads):
+# Load attack payloads from YAML file
+def load_payloads(filename="payloads.yaml"):
+    with open(filename, "r") as file:
+        return yaml.safe_load(file)
+
+# Save results as JSON report
+def save_results(results, filename="scan_results.json"):
+    with open(filename, "w") as file:
+        json.dump(results, file, indent=4)
+    print(colored(f"\n[✔] Results saved to {filename}", "cyan"))
+
+# XSS Scanner
+def scan_xss(url, payloads, results, progress_bar):
     headers = {"User-Agent": "Mozilla/5.0"}
     for payload in payloads:
         try:
             response = requests.get(url, headers=headers, params={'q': payload}, timeout=5)
             if payload in response.text:
-                print(colored(f"[XSS] Potential vulnerability found with payload: {payload}", 'red'))
+                results.append({"type": "XSS", "url": url, "payload": payload})
+                print(colored(f"[XSS] Vulnerability found: {payload}", "red"))
+                logging.info(f"XSS Vulnerability found at {url} with payload: {payload}")
         except requests.RequestException as e:
-            print(colored(f"[XSS] Error scanning {url}: {e}", 'yellow'))
+            logging.warning(f"[XSS] Error scanning {url}: {e}")
+        progress_bar.update(1)
 
-def scan_sql_injection(url, payloads):
+# SQL Injection Scanner
+def scan_sql_injection(url, payloads, results, progress_bar):
     headers = {"User-Agent": "Mozilla/5.0"}
     for payload in payloads:
         try:
             response = requests.get(url, headers=headers, params={'id': payload}, timeout=5)
             if "sql syntax" in response.text.lower() or "warning" in response.text.lower():
-                print(colored(f"[SQLi] Potential vulnerability found with payload: {payload}", 'red'))
+                results.append({"type": "SQLi", "url": url, "payload": payload})
+                print(colored(f"[SQLi] Vulnerability found: {payload}", "red"))
+                logging.info(f"SQL Injection found at {url} with payload: {payload}")
         except requests.RequestException as e:
-            print(colored(f"[SQLi] Error scanning {url}: {e}", 'yellow'))
+            logging.warning(f"[SQLi] Error scanning {url}: {e}")
+        progress_bar.update(1)
 
-def scan_subdomain_takeover(base_url, subdomains):
+# Open Redirect Scanner
+def scan_open_redirect(url, payloads, results, progress_bar):
+    headers = {"User-Agent": "Mozilla/5.0"}
+    for payload in payloads:
+        try:
+            response = requests.get(url, headers=headers, params={'redirect': payload}, timeout=5, allow_redirects=True)
+            if payload in response.url:
+                results.append({"type": "Open Redirect", "url": url, "payload": payload})
+                print(colored(f"[Open Redirect] Vulnerability found: {payload}", "red"))
+                logging.info(f"Open Redirect found at {url} with payload: {payload}")
+        except requests.RequestException as e:
+            logging.warning(f"[Open Redirect] Error scanning {url}: {e}")
+        progress_bar.update(1)
+
+# Directory Traversal Scanner
+def scan_directory_traversal(url, payloads, results, progress_bar):
+    headers = {"User-Agent": "Mozilla/5.0"}
+    for payload in payloads:
+        try:
+            response = requests.get(url + payload, headers=headers, timeout=5)
+            if "root:x:0:0:" in response.text or "boot.ini" in response.text:
+                results.append({"type": "Directory Traversal", "url": url, "payload": payload})
+                print(colored(f"[Directory Traversal] Vulnerability found: {payload}", "red"))
+                logging.info(f"Directory Traversal found at {url} with payload: {payload}")
+        except requests.RequestException as e:
+            logging.warning(f"[Directory Traversal] Error scanning {url}: {e}")
+        progress_bar.update(1)
+
+# Subdomain Takeover Scanner
+def scan_subdomain_takeover(base_url, subdomains, results, progress_bar):
     headers = {"User-Agent": "Mozilla/5.0"}
     for subdomain in subdomains:
         full_url = f"https://{subdomain}.{base_url}"
         try:
-            # Check if the subdomain resolves
-            socket.gethostbyname(full_url.replace("https://", ""))
+            socket.gethostbyname(f"{subdomain}.{base_url}")
             response = requests.get(full_url, headers=headers, timeout=5)
             if "This domain may be for sale" in response.text or "Domain not found" in response.text:
-                print(colored(f"[Subdomain Takeover] Potential vulnerability found: {full_url}", 'red'))
+                results.append({"type": "Subdomain Takeover", "url": full_url})
+                print(colored(f"[Subdomain Takeover] Found: {full_url}", "red"))
+                logging.info(f"Subdomain takeover vulnerability found: {full_url}")
         except (socket.gaierror, requests.RequestException) as e:
-            print(colored(f"[Subdomain Takeover] Error scanning {full_url}: {e}", 'yellow'))
+            logging.warning(f"[Subdomain Takeover] Error scanning {full_url}: {e}")
+        progress_bar.update(1)
 
-def scan_information_disclosure(url):
-    headers = {"User-Agent": "Mozilla/5.0"}
-    try:
-        response = requests.get(url, headers=headers, timeout=5)
-        keywords = ["password", "username", "error", "confidential"]
-        if any(keyword in response.text.lower() for keyword in keywords):
-            print(colored(f"[Info Disclosure] Potential vulnerability found at: {url}", 'red'))
-    except requests.RequestException as e:
-        print(colored(f"[Info Disclosure] Error scanning {url}: {e}", 'yellow'))
+# Multi-threaded scanning function
+def run_scans(url, base_url):
+    payloads = load_payloads()
+    results = []
+    
+    total_tasks = sum(len(payloads[key]) for key in payloads) + len(payloads["subdomains"])
+    
+    print("\n[✔] Starting scans...\n")
+    with tqdm(total=total_tasks, desc="Scanning Progress") as progress_bar, ThreadPoolExecutor(max_workers=10) as executor:
+        executor.submit(scan_xss, url, payloads["xss"], results, progress_bar)
+        executor.submit(scan_sql_injection, url, payloads["sql_injection"], results, progress_bar)
+        executor.submit(scan_open_redirect, url, payloads["open_redirect"], results, progress_bar)
+        executor.submit(scan_directory_traversal, url, payloads["directory_traversal"], results, progress_bar)
+        executor.submit(scan_subdomain_takeover, base_url, payloads["subdomains"], results, progress_bar)
 
-def run_scans():
-    print_banner()
-    url = input("Enter the URL to scan: ")
-    base_url = input("Enter the base URL for subdomain scanning (e.g., example.com): ")
+    save_results(results)
 
-    xss_payloads = ["<script>alert('XSS')</script>", "<img src=x onerror=alert('XSS')>", "<svg/onload=alert('XSS')>"]
-    sql_payloads = ["' OR '1'='1", "' OR '1'='1' --", "' OR '1'='1' /*"]
-    subdomains = ["test", "dev", "staging", "old"]
-
-    threads = [
-        threading.Thread(target=scan_xss, args=(url, xss_payloads)),
-        threading.Thread(target=scan_sql_injection, args=(url, sql_payloads)),
-        threading.Thread(target=scan_information_disclosure, args=(url,)),
-        threading.Thread(target=scan_subdomain_takeover, args=(base_url, subdomains)),
-    ]
-
-    for thread in threads:
-        thread.start()
-    for thread in threads:
-        thread.join()
+# Command-line argument parsing
+def main():
+    parser = argparse.ArgumentParser(description="Advanced Web Vulnerability Scanner")
+    parser.add_argument("-u", "--url", help="Target URL", required=True)
+    parser.add_argument("-b", "--base-url", help="Base domain for subdomain scanning", required=True)
+    args = parser.parse_args()
+    
+    run_scans(args.url, args.base_url)
 
 if __name__ == "__main__":
-    run_scans()
+    main()
