@@ -59,6 +59,8 @@ This tool is designed for penetration testers, ethical hackers, and cybersecurit
     Penetration Testing: Aids in assessing the security posture of web applications.
     Educational Use: Helps learners understand how common web exploits work.
 
+
+
 How to Use the Scanner?
 
 1. Run the scanner with a target URL:
@@ -68,5 +70,10 @@ python scanner.py -u http://example.com
 2. Monitor the scan progress in real-time.
 3. Review findings in scan_results.json and scanner.log.
 4. Take action on detected vulnerabilities.
+
+   if you get any problem then please use this tool in python environment
+   python3 -m venv myenv
+source myenv/bin/activate
+
 
 This scanner is an essential tool for bug hunters, penetration testers, and security professionals looking to automate security assessments efficiently. 🚀
